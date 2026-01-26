@@ -1,146 +1,297 @@
-import {
-  App,
-  Plugin,
-  TFile,
-  Modal,
-  normalizePath,
-  Notice
-} from "obsidian";
+import { App, Modal, Plugin, PluginSettingTab, Setting, TFile, Vault, normalizePath, Notice } from "obsidian";
 
+// =====================
+// Settings
+// =====================
+interface OrganizerSettings {
+  dryRun: boolean;
+}
+
+const DEFAULT_SETTINGS: OrganizerSettings = {
+  dryRun: true,
+};
+
+// =====================
+// Main Plugin
+// =====================
 export default class ImageOrganizerPlugin extends Plugin {
-
-  dryRun = true;
+  settings: OrganizerSettings;
 
   async onload() {
-    this.addCommand({
-      id: "preview-image-organization",
-      name: "Preview Image Organization (Dry Run)",
-      callback: () => this.organizeImages(true)
-    });
+    await this.loadSettings();
+
+    this.addSettingTab(new OrganizerSettingTab(this.app, this));
 
     this.addCommand({
-      id: "apply-image-organization",
-      name: "Apply Image Organization (Move Files)",
-      callback: () => this.organizeImages(false)
+      id: "run-image-organizer",
+      name: "Run Image Organizer (dry-run by default)",
+      callback: () => this.runOrganizer(),
     });
   }
 
-  async organizeImages(dryRun: boolean) {
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  // =====================
+  // Run Organizer
+  // =====================
+  async runOrganizer() {
     const vault = this.app.vault;
     const files = vault.getFiles();
-
-    const imageRefs = await this.mapImageReferences(files);
     const preview: string[] = [];
+    const logLines: string[] = [];
 
+    const months: Record<string, string> = {
+      "01": "January",
+      "02": "February",
+      "03": "March",
+      "04": "April",
+      "05": "May",
+      "06": "June",
+      "07": "July",
+      "08": "August",
+      "09": "September",
+      "10": "October",
+      "11": "November",
+      "12": "December",
+    };
+
+    const AUDIO_EXTENSIONS = ["m4a", "mp3", "wav", "flac", "aac"];
+
+    // Loop through files
     for (const file of files) {
-      if (!file.extension.match(/png|jpg|jpeg/i)) continue;
+      if (!file.extension.match(/(png|jpg|jpeg|m4a|mp3|wav|flac|aac)/i)) {
+        preview.push(`[SKIP] Unsupported type: ${file.path}`);
+        continue;
+      }
 
-      const referencedIn = imageRefs.get(file.name);
-      const year = this.extractYear(file.name) ?? "Unknown";
+      let year: string | null = null;
+      let month: string | null = null;
+      let day: string | null = null;
 
-      let targetPath: string | null = null;
-      let reason = "";
+      // Parse date from filename
+      const matchNumeric = file.name.match(/(\d{4})(\d{2})(\d{2})/);
+      const matchMac = file.name.match(/(\d{4})-(\d{2})-(\d{2})/);
 
-      if (referencedIn === "gamereview.md") {
-        targetPath = `notes/${year}/Other/Game/${file.name}`;
-        reason = "Referenced in gamereview.md";
+      if (matchNumeric) [year, month, day] = matchNumeric.slice(1, 4);
+      else if (matchMac) [year, month, day] = matchMac.slice(1, 4);
+
+      // If audio without date, fallback to file creation/modification
+      if ((!year || !month || !day) && AUDIO_EXTENSIONS.includes(file.extension.toLowerCase())) {
+        const stats = await vault.adapter.stat(file.path);
+        const created = new Date(stats.birthtime);
+        const modified = new Date(stats.mtime);
+
+        // If dates differ, prompt user
+        if (created.toDateString() !== modified.toDateString()) {
+          await new DateConflictModal(this.app, file.path, created, modified, async (chosen: Date | null) => {
+            if (chosen) {
+              year = String(chosen.getFullYear());
+              month = String(chosen.getMonth() + 1).padStart(2, "0");
+              day = String(chosen.getDate()).padStart(2, "0");
+            }
+            // null = leave in place
+          }).open();
+        } else {
+          const chosen = created;
+          year = String(chosen.getFullYear());
+          month = String(chosen.getMonth() + 1).padStart(2, "0");
+          day = String(chosen.getDate()).padStart(2, "0");
+        }
+      }
+
+      if (!year || !month || !day) {
+        preview.push(`[SKIP] No valid date: ${file.path}`);
+        continue;
+      }
+
+      const monthName = months[month] ?? "Unknown";
+      if (monthName === "Unknown") {
+        preview.push(`[SKIP] Unknown month: ${file.path}`);
+        continue;
+      }
+
+      // Determine target path
+      let targetPath: string;
+      if (file.path.toLowerCase().includes("gamereview.md")) {
+        targetPath = normalizePath(`${year}/Other/Game/${file.name}`);
       } else {
-        const date = this.extractDate(file.name);
-        if (!date) continue;
-
-        targetPath = `notes/${date.year}/${date.month}/${date.full}/${file.name}`;
-        reason = "Date from filename";
+        targetPath = normalizePath(`${year}/${monthName}/${year}-${month}-${day}/${file.name}`);
       }
 
-      preview.push(
-        `• ${file.name}\n` +
-        `  FROM: ${file.path}\n` +
-        `  TO:   ${targetPath}\n` +
-        `  WHY:  ${reason}\n`
-      );
+      // Preview & log
+      preview.push(`[DRY RUN] ${file.path} → ${targetPath}`);
+      logLines.push(`- ${new Date().toISOString()} | ${file.path} → ${targetPath}`);
+    }
 
-      if (!dryRun) {
-        await vault.createFolder(targetPath.split("/").slice(0, -1).join("/"))
-          .catch(() => {});
-        await vault.rename(file, normalizePath(targetPath));
+    // Show preview modal first
+    new PreviewModal(this.app, preview, async () => this.confirmMoves(logLines)).open();
+  }
+
+  // =====================
+  // Confirm and execute moves
+  // =====================
+  async confirmMoves(logLines: string[]) {
+    if (this.settings.dryRun) {
+      new Notice("Dry-run enabled: no files moved.");
+      return;
+    }
+
+    const vault = this.app.vault;
+
+    for (const line of logLines) {
+      const match = line.match(/→ (.+)$/);
+      const srcMatch = line.match(/\| (.+) →/);
+      if (!match || !srcMatch) continue;
+
+      const dstPath = normalizePath(match[1]);
+      const srcPath = normalizePath(srcMatch[1]);
+
+      // Ensure folder exists
+      const folder = dstPath.substring(0, dstPath.lastIndexOf("/"));
+      if (!(await vault.adapter.exists(folder))) {
+        await vault.createFolder(folder).catch(() => {});
+      }
+
+      // Move file
+      const file = vault.getAbstractFileByPath(srcPath) as TFile;
+      if (file) {
+        await vault.rename(file, dstPath).catch(err => {
+          console.error(`Failed to move ${srcPath} → ${dstPath}`, err);
+        });
       }
     }
 
-    if (dryRun) {
-      new PreviewModal(this.app, preview).open();
+    // Append to log
+    const logFilePath = "logs/image-organizer-log.md";
+    const existing = vault.getAbstractFileByPath(logFilePath);
+    const content = logLines.join("\n") + "\n";
+
+    if (existing && existing instanceof TFile) {
+      const old = await vault.read(existing);
+      await vault.modify(existing, old + content);
     } else {
-      new Notice("Images organized successfully.");
+      await vault.create(logFilePath, content);
     }
-  }
 
-  async mapImageReferences(files: TFile[]) {
-    const map = new Map<string, string>();
-
-    for (const file of files) {
-      if (file.extension !== "md") continue;
-
-      const content = await this.app.vault.read(file);
-      const matches = content.matchAll(/!\[\[([^\]]+)\]\]|!\[.*?\]\((.*?)\)/g);
-
-      for (const match of matches) {
-        const image = match[1] || match[2];
-        if (image) map.set(image, file.name);
-      }
-    }
-    return map;
-  }
-
-  extractYear(name: string): string | null {
-    return name.match(/(\d{4})/)?.[1] ?? null;
-  }
-
-  extractDate(name: string) {
-    const m = name.match(/(\d{4})(\d{2})(\d{2})|(\d{4})-(\d{2})-(\d{2})/);
-    if (!m) return null;
-
-    const year = m[1] || m[4];
-    const monthNum = m[2] || m[5];
-    const day = m[3] || m[6];
-
-    const monthNames: Record<string, string> = {
-      "01": "January", "02": "February", "03": "March",
-      "04": "April", "05": "May", "06": "June",
-      "07": "July", "08": "August", "09": "September",
-      "10": "October", "11": "November", "12": "December"
-    };
-
-    return {
-      year,
-      month: monthNames[monthNum],
-      full: `${year}-${monthNum}-${day}`
-    };
+    new Notice("Image Organizer: files moved and logged.");
   }
 }
 
-/* ---------- Preview Modal ---------- */
-
+// =====================
+// Preview Modal
+// =====================
 class PreviewModal extends Modal {
-  constructor(app: App, private lines: string[]) {
+  previewLines: string[];
+  onConfirm: () => void;
+
+  constructor(app: App, previewLines: string[], onConfirm: () => void) {
     super(app);
+    this.previewLines = previewLines;
+    this.onConfirm = onConfirm;
   }
 
   onOpen() {
     const { contentEl } = this;
-    contentEl.createEl("h2", { text: "Image Organization – Dry Run Preview" });
+    contentEl.createEl("h2", { text: "Image & Audio Organizer Preview" });
 
     const pre = contentEl.createEl("pre");
-    pre.setText(this.lines.join("\n"));
+    pre.textContent = this.previewLines.join("\n");
 
-    contentEl.createEl("p", {
-      text: "Nothing has been moved yet. Run the Apply command to proceed."
-    });
+    const container = contentEl.createDiv({ cls: "modal-button-container" });
+
+    const applyBtn = container.createEl("button", { text: "Apply Changes" });
+    applyBtn.onclick = () => {
+      this.close();
+      this.onConfirm();
+    };
+
+    const cancelBtn = container.createEl("button", { text: "Cancel" });
+    cancelBtn.onclick = () => this.close();
+  }
+
+  onClose() {
+    this.contentEl.empty();
   }
 }
 
+// =====================
+// Date Conflict Modal
+// =====================
+class DateConflictModal extends Modal {
+  filePath: string;
+  created: Date;
+  modified: Date;
+  onChoose: (chosen: Date | null) => Promise<void>;
 
+  constructor(app: App, filePath: string, created: Date, modified: Date, onChoose: (chosen: Date | null) => Promise<void>) {
+    super(app);
+    this.filePath = filePath;
+    this.created = created;
+    this.modified = modified;
+    this.onChoose = onChoose;
+  }
 
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: "Date Conflict Detected" });
+    contentEl.createEl("p", { text: `File: ${this.filePath}` });
+    contentEl.createEl("p", { text: `Created: ${this.created.toDateString()}, Modified: ${this.modified.toDateString()}` });
+    contentEl.createEl("p", { text: "Which date should be used for organizing?" });
 
+    const container = contentEl.createDiv({ cls: "modal-button-container" });
 
+    container.createEl("button", { text: "Use Created Date" }).onclick = async () => {
+      await this.onChoose(this.created);
+      this.close();
+    };
+    container.createEl("button", { text: "Use Modified Date" }).onclick = async () => {
+      await this.onChoose(this.modified);
+      this.close();
+    };
+    container.createEl("button", { text: "Leave in Place" }).onclick = async () => {
+      await this.onChoose(null);
+      this.close();
+    };
+  }
 
+  onClose() {
+    this.contentEl.empty();
+  }
+}
 
+// =====================
+// Settings Tab
+// =====================
+class OrganizerSettingTab extends PluginSettingTab {
+  plugin: ImageOrganizerPlugin;
 
+  constructor(app: App, plugin: ImageOrganizerPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    containerEl.createEl("h3", { text: "Image & Audio Organizer Settings" });
+
+    new Setting(containerEl)
+      .setName("Dry-run mode")
+      .setDesc("When enabled, files are never moved (preview only).")
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.dryRun)
+          .onChange(async value => {
+            this.plugin.settings.dryRun = value;
+            await this.plugin.saveSettings();
+          })
+      );
+  }
+}
