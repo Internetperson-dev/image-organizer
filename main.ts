@@ -193,7 +193,10 @@ class PreviewModal extends Modal {
     pre.textContent = this.previewLines.join("\n");
     const container = contentEl.createDiv({ cls: "modal-button-container" });
     container.createEl("button", { text: "Close All (Leave in place)" }).onclick = () => {
-      this.app.plugins.getPlugin("image-organizer")?.settings.leaveAllInPlace = true;
+    const plugin = this.app.plugins.getPlugin("image-organizer");
+if (plugin) {
+    plugin.settings.leaveAllInPlace = true;
+}
       this.close();
     };
     container.createEl("button", { text: "Close" }).onclick = () => this.close();
