@@ -18,8 +18,14 @@ Extract the .zip from the Github Action and move it into
 It should be look like:
 
   📁 plugins         📁 image-organizer        📃 main.js
+
+  
                                                📃 manifest.json
+
+                                               
                                                🎨 styles.css
+
+                                               
 
 
 
