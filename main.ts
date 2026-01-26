@@ -61,10 +61,13 @@ export default class ImageOrganizerPlugin extends Plugin {
       "12": "December",
     };
 
+    const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "heic"];
     const AUDIO_EXTENSIONS = ["m4a", "mp3", "wav", "flac", "aac"];
 
     for (const file of files) {
-      if (!file.extension.match(/(png|jpg|jpeg|m4a|mp3|wav|flac|aac)/i)) {
+      const ext = file.extension.toLowerCase();
+
+      if (![...IMAGE_EXTENSIONS, ...AUDIO_EXTENSIONS].includes(ext)) {
         const msg = `[SKIP] Unsupported type: ${file.path}`;
         preview.push(msg);
         logLines.push(msg);
@@ -83,7 +86,7 @@ export default class ImageOrganizerPlugin extends Plugin {
       else if (matchMac) [year, month, day] = matchMac.slice(1, 4);
 
       // Audio fallback to file stats
-      if ((!year || !month || !day) && AUDIO_EXTENSIONS.includes(file.extension.toLowerCase())) {
+      if ((!year || !month || !day) && AUDIO_EXTENSIONS.includes(ext)) {
         const stats = await vault.adapter.stat(file.path);
         const created = new Date(stats.birthtime);
         const modified = new Date(stats.mtime);
@@ -181,7 +184,14 @@ export default class ImageOrganizerPlugin extends Plugin {
   // =====================
   async appendLog(logLines: string[]) {
     const vault = this.app.vault;
-    const logFilePath = "logs/image-organizer-log.md";
+    const logFolderPath = "logs";
+    const logFilePath = `${logFolderPath}/image-organizer-log.md`;
+
+    // Create the logs folder if it doesn't exist
+    if (!(await vault.adapter.exists(logFolderPath))) {
+      await vault.createFolder(logFolderPath).catch(() => {});
+    }
+
     const existing = vault.getAbstractFileByPath(logFilePath);
     const content = logLines.join("\n") + "\n";
 
