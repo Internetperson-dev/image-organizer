@@ -1,4 +1,4 @@
-import { App, Modal, Plugin, PluginSettingTab, Setting, TFile, Vault, normalizePath, Notice } from "obsidian";
+import { App, Modal, Plugin, PluginSettingTab, Setting, TFile, normalizePath, Notice } from "obsidian";
 
 // =====================
 // Settings
@@ -24,7 +24,7 @@ export default class ImageOrganizerPlugin extends Plugin {
 
     this.addCommand({
       id: "run-image-organizer",
-      name: "Run Image Organizer (dry-run by default)",
+      name: "Run Image & Audio Organizer",
       callback: () => this.runOrganizer(),
     });
   }
@@ -38,7 +38,7 @@ export default class ImageOrganizerPlugin extends Plugin {
   }
 
   // =====================
-  // Run Organizer
+  // Main Organizer
   // =====================
   async runOrganizer() {
     const vault = this.app.vault;
@@ -63,10 +63,11 @@ export default class ImageOrganizerPlugin extends Plugin {
 
     const AUDIO_EXTENSIONS = ["m4a", "mp3", "wav", "flac", "aac"];
 
-    // Loop through files
     for (const file of files) {
       if (!file.extension.match(/(png|jpg|jpeg|m4a|mp3|wav|flac|aac)/i)) {
-        preview.push(`[SKIP] Unsupported type: ${file.path}`);
+        const msg = `[SKIP] Unsupported type: ${file.path}`;
+        preview.push(msg);
+        logLines.push(msg);
         continue;
       }
 
@@ -74,20 +75,19 @@ export default class ImageOrganizerPlugin extends Plugin {
       let month: string | null = null;
       let day: string | null = null;
 
-      // Parse date from filename
+      // Parse filename for date
       const matchNumeric = file.name.match(/(\d{4})(\d{2})(\d{2})/);
       const matchMac = file.name.match(/(\d{4})-(\d{2})-(\d{2})/);
 
       if (matchNumeric) [year, month, day] = matchNumeric.slice(1, 4);
       else if (matchMac) [year, month, day] = matchMac.slice(1, 4);
 
-      // If audio without date, fallback to file creation/modification
+      // Audio fallback to file stats
       if ((!year || !month || !day) && AUDIO_EXTENSIONS.includes(file.extension.toLowerCase())) {
         const stats = await vault.adapter.stat(file.path);
         const created = new Date(stats.birthtime);
         const modified = new Date(stats.mtime);
 
-        // If dates differ, prompt user
         if (created.toDateString() !== modified.toDateString()) {
           await new DateConflictModal(this.app, file.path, created, modified, async (chosen: Date | null) => {
             if (chosen) {
@@ -95,7 +95,6 @@ export default class ImageOrganizerPlugin extends Plugin {
               month = String(chosen.getMonth() + 1).padStart(2, "0");
               day = String(chosen.getDate()).padStart(2, "0");
             }
-            // null = leave in place
           }).open();
         } else {
           const chosen = created;
@@ -106,13 +105,17 @@ export default class ImageOrganizerPlugin extends Plugin {
       }
 
       if (!year || !month || !day) {
-        preview.push(`[SKIP] No valid date: ${file.path}`);
+        const msg = `[SKIP] No valid date: ${file.path}`;
+        preview.push(msg);
+        logLines.push(msg);
         continue;
       }
 
       const monthName = months[month] ?? "Unknown";
       if (monthName === "Unknown") {
-        preview.push(`[SKIP] Unknown month: ${file.path}`);
+        const msg = `[SKIP] Unknown month: ${file.path}`;
+        preview.push(msg);
+        logLines.push(msg);
         continue;
       }
 
@@ -124,17 +127,20 @@ export default class ImageOrganizerPlugin extends Plugin {
         targetPath = normalizePath(`${year}/${monthName}/${year}-${month}-${day}/${file.name}`);
       }
 
-      // Preview & log
-      preview.push(`[DRY RUN] ${file.path} → ${targetPath}`);
-      logLines.push(`- ${new Date().toISOString()} | ${file.path} → ${targetPath}`);
+      const dryTag = this.settings.dryRun ? "[DRY RUN] " : "";
+      preview.push(`${dryTag}${file.path} → ${targetPath}`);
+      logLines.push(`${dryTag}${new Date().toISOString()} | ${file.path} → ${targetPath}`);
     }
 
     // Show preview modal first
     new PreviewModal(this.app, preview, async () => this.confirmMoves(logLines)).open();
+
+    // Log dry-run moves immediately
+    await this.appendLog(logLines);
   }
 
   // =====================
-  // Confirm and execute moves
+  // Confirm & execute moves
   // =====================
   async confirmMoves(logLines: string[]) {
     if (this.settings.dryRun) {
@@ -152,13 +158,11 @@ export default class ImageOrganizerPlugin extends Plugin {
       const dstPath = normalizePath(match[1]);
       const srcPath = normalizePath(srcMatch[1]);
 
-      // Ensure folder exists
       const folder = dstPath.substring(0, dstPath.lastIndexOf("/"));
       if (!(await vault.adapter.exists(folder))) {
         await vault.createFolder(folder).catch(() => {});
       }
 
-      // Move file
       const file = vault.getAbstractFileByPath(srcPath) as TFile;
       if (file) {
         await vault.rename(file, dstPath).catch(err => {
@@ -167,7 +171,16 @@ export default class ImageOrganizerPlugin extends Plugin {
       }
     }
 
-    // Append to log
+    // Append executed moves to log
+    await this.appendLog(logLines);
+    new Notice("Image & Audio Organizer: files moved and logged.");
+  }
+
+  // =====================
+  // Append to log
+  // =====================
+  async appendLog(logLines: string[]) {
+    const vault = this.app.vault;
     const logFilePath = "logs/image-organizer-log.md";
     const existing = vault.getAbstractFileByPath(logFilePath);
     const content = logLines.join("\n") + "\n";
@@ -178,8 +191,6 @@ export default class ImageOrganizerPlugin extends Plugin {
     } else {
       await vault.create(logFilePath, content);
     }
-
-    new Notice("Image Organizer: files moved and logged.");
   }
 }
 
@@ -205,14 +216,11 @@ class PreviewModal extends Modal {
 
     const container = contentEl.createDiv({ cls: "modal-button-container" });
 
-    const applyBtn = container.createEl("button", { text: "Apply Changes" });
-    applyBtn.onclick = () => {
+    container.createEl("button", { text: "Apply Changes" }).onclick = () => {
       this.close();
       this.onConfirm();
     };
-
-    const cancelBtn = container.createEl("button", { text: "Cancel" });
-    cancelBtn.onclick = () => this.close();
+    container.createEl("button", { text: "Cancel" }).onclick = () => this.close();
   }
 
   onClose() {
@@ -284,7 +292,7 @@ class OrganizerSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Dry-run mode")
-      .setDesc("When enabled, files are never moved (preview only).")
+      .setDesc("When enabled, files are never moved (preview only). Logs are still recorded.")
       .addToggle(toggle =>
         toggle
           .setValue(this.plugin.settings.dryRun)
