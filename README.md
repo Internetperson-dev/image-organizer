@@ -10,5 +10,7 @@ It should handle
 
 > [!CAUTION]
 > Please make a backup before using.
-> This software comes with no warranty or guarantee. SlopGPT made it.
+> This software comes with no warranty or guarantee.
+>
+> SlopGPT made it.
 
