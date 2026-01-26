@@ -150,6 +150,17 @@ export default class ImageOrganizerPlugin extends Plugin {
         }
       }
 
+      // =====================
+      // Folder path fallback
+      // =====================
+      if (!year || !month || !day) {
+        const folderMatch = file.path.match(/(\d{4})-(\d{2})-(\d{2})/);
+        if (folderMatch) {
+          [year, month, day] = folderMatch.slice(1, 4);
+          reason = "Folder path date";
+        }
+      }
+
       if (!year || !month || !day) {
         const msg = `[SKIP] ${this.maskName(file.path)} | Reason: Unknown date`;
         preview.push(msg); logLines.push(msg);
@@ -171,9 +182,7 @@ export default class ImageOrganizerPlugin extends Plugin {
         targetPath = normalizePath(`${year}/${monthName}/${year}-${month}-${day}/${file.name}`);
       }
 
-      // Include linked note in logs if exists
-      const linkedFrom = fileToLinkedNoteDate[file.path] ? ` | Linked from note` : "";
-
+      const linkedFrom = fileToLinkedNoteDate[file.path] ? " | Linked from note" : "";
       const dryTag = this.settings.dryRun ? "[DRY RUN] " : "";
       const logMsg = `${dryTag}${this.maskName(file.path)} → ${targetPath} | Date used: ${year}-${month}-${day} | Reason: ${reason}${linkedFrom}`;
       preview.push(logMsg); logLines.push(logMsg);
@@ -196,7 +205,7 @@ export default class ImageOrganizerPlugin extends Plugin {
         if (!targetPath.endsWith(".md") &&
             !IMAGE_EXTENSIONS.includes(targetPath.split(".").pop()!) &&
             !AUDIO_EXTENSIONS.includes(targetPath.split(".").pop()!)) {
-          targetPath += ".md"; // assume markdown if no extension
+          targetPath += ".md";
         }
 
         const exists = await vault.adapter.exists(targetPath);
@@ -247,26 +256,21 @@ export default class ImageOrganizerPlugin extends Plugin {
   }
 
   // =====================
-  // Append to log
+  // Append to log (timestamped)
   // =====================
   async appendLog(logLines: string[]) {
     const vault = this.app.vault;
     const logFolderPath = "logs";
-    const logFilePath = `${logFolderPath}/image-organizer-log.md`;
 
     if (!(await vault.adapter.exists(logFolderPath))) {
       await vault.createFolder(logFolderPath).catch(() => {});
     }
 
-    const existing = vault.getAbstractFileByPath(logFilePath);
-    const content = logLines.join("\n") + "\n";
+    const now = new Date();
+    const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+    const logFilePath = `${logFolderPath}/image-organizer-log-${timestamp}.md`;
 
-    if (existing && existing instanceof TFile) {
-      const old = await vault.read(existing);
-      await vault.modify(existing, old + content);
-    } else {
-      await vault.create(logFilePath, content);
-    }
+    await vault.create(logFilePath, logLines.join("\n") + "\n");
   }
 
   maskName(filePath: string): string {
