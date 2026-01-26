@@ -3,16 +3,17 @@ import { App, Modal, Plugin, PluginSettingTab, Setting, TFile, normalizePath, No
 interface OrganizerSettings {
   dryRun: boolean;
   maskSensitive: boolean;
+  leaveAllInPlace: boolean;
 }
 
 const DEFAULT_SETTINGS: OrganizerSettings = {
   dryRun: true,
   maskSensitive: false,
+  leaveAllInPlace: false,
 };
 
 export default class ImageOrganizerPlugin extends Plugin {
   settings: OrganizerSettings;
-  leaveAllInPlace: boolean = false;
 
   async onload() {
     await this.loadSettings();
@@ -47,7 +48,7 @@ export default class ImageOrganizerPlugin extends Plugin {
     const mediaMap: Record<string, string> = {};
 
     // ---------------------
-    // Load existing media.txt
+    // Load manual media.txt
     // ---------------------
     if (await vault.adapter.exists(mediaTxtPath)) {
       const content = await vault.adapter.read(mediaTxtPath);
@@ -57,52 +58,63 @@ export default class ImageOrganizerPlugin extends Plugin {
         const folder = lines[i + 1];
         if (md && folder) mediaMap[md] = folder;
       }
+    } else {
+      new Notice("media.txt not found in vault root");
+      return;
     }
 
     const metadataCache = this.app.metadataCache;
 
     // ---------------------
-    // Parse markdown for linked media
+    // Process markdown files for linked media
     // ---------------------
     for (const mdFile of files.filter(f => f.extension === "md")) {
+      if (!mediaMap[mdFile.path]) continue; // only process MD listed in media.txt
+      const targetFolder = normalizePath(mediaMap[mdFile.path]);
+      if (!this.settings.dryRun) await vault.createFolder(targetFolder).catch(() => {});
+
       const cache = metadataCache.getFileCache(mdFile);
       if (!cache?.links) continue;
 
-      const links = cache.links.map(l => normalizePath(l.link));
-      const mediaLinks = links.filter(l => {
-        const ext = l.split(".").pop()?.toLowerCase();
-        return SUPPORTED_EXTENSIONS.includes(ext ?? "");
-      });
-      if (mediaLinks.length === 0) continue;
+      for (const linkObj of cache.links) {
+        const linked = normalizePath(linkObj.link);
+        const ext = linked.split(".").pop()?.toLowerCase();
+        if (!ext || !SUPPORTED_EXTENSIONS.includes(ext)) continue;
 
-      const mdFolder = mdFile.parent.path;
-      const targetFolder = normalizePath(`${mdFolder}/${mdFile.basename} Media`);
-      mediaMap[mdFile.path] = targetFolder;
+        const mediaFile = vault.getAbstractFileByPath(linked) as TFile;
+        if (!mediaFile) {
+          const msg = `[BROKEN LINK] ${mdFile.path} → ${linked}`;
+          preview.push(msg); logLines.push(msg);
+          continue;
+        }
 
-      if (!this.settings.dryRun) await vault.createFolder(targetFolder).catch(() => {});
+        // Check creation vs modification dates for audio
+        if (AUDIO_EXTENSIONS.includes(ext)) {
+          const created = mediaFile.stat.ctime;
+          const modified = mediaFile.stat.mtime;
+          if (created !== modified && !this.settings.leaveAllInPlace) {
+            const msg = `[DATE MISMATCH] ${mediaFile.name} | created: ${new Date(created).toISOString()} modified: ${new Date(modified).toISOString()}`;
+            preview.push(msg); logLines.push(msg);
+          }
+        }
 
-      for (const mediaPath of mediaLinks) {
-        const mediaFile = vault.getAbstractFileByPath(mediaPath) as TFile;
-        if (!mediaFile) continue;
+        const dstPath = normalizePath(`${targetFolder}/${mediaFile.name}`);
+        const msg = `[MD MEDIA MOVE] ${this.maskName(mdFile.path)} → ${dstPath}`;
+        preview.push(msg); logLines.push(msg);
 
-        const dstPath = `${targetFolder}/${mediaFile.name}`;
-        const logMsg = `[MD MEDIA MOVE] ${this.maskName(mdFile.path)} → ${dstPath}`;
-        preview.push(logMsg);
-        logLines.push(logMsg);
-
-        if (!this.settings.dryRun) {
+        if (!this.settings.dryRun && !this.settings.leaveAllInPlace) {
           await vault.rename(mediaFile, dstPath).catch(err => {
             console.error(`Failed to move ${mediaFile.path} → ${dstPath}`, err);
           });
         }
       }
 
-      preview.push(`Check media.txt for MD-linked media from ${mdFile.path}`);
-      logLines.push(`Check media.txt for MD-linked media from ${mdFile.path}`);
+      preview.push(`Check media.txt for media from ${mdFile.path}`);
+      logLines.push(`Check media.txt for media from ${mdFile.path}`);
     }
 
     // ---------------------
-    // Date-based organization for remaining files
+    // Date-based organization for remaining files (skipped if MD)
     // ---------------------
     for (const file of files) {
       const ext = file.extension.toLowerCase();
@@ -114,18 +126,15 @@ export default class ImageOrganizerPlugin extends Plugin {
         continue;
       }
 
-      // Implement your existing date-based organization here
-      // Fallback to folder-date from filename or metadata
+      // You can add your date-based organization logic here
     }
 
     // ---------------------
-    // Broken link detection
+    // Detect broken links in all MD
     // ---------------------
-    const mdFiles = files.filter(f => f.extension === "md");
-    for (const mdFile of mdFiles) {
+    for (const mdFile of files.filter(f => f.extension === "md")) {
       const cache = metadataCache.getFileCache(mdFile);
       if (!cache?.links) continue;
-
       for (const link of cache.links) {
         const target = normalizePath(link.link);
         const targetFile = vault.getAbstractFileByPath(target);
@@ -136,17 +145,12 @@ export default class ImageOrganizerPlugin extends Plugin {
     // ---------------------
     // Write logs
     // ---------------------
-    await this.appendLog(logLines, "logs/image-organizer-log-" + this.timestamp() + ".md");
+    const logFileName = `logs/image-organizer-log-${this.timestamp()}.md`;
+    await this.appendLog(logLines, logFileName);
 
     // ---------------------
-    // Write media.txt
+    // Preview modal
     // ---------------------
-    let mediaTxtContent = "";
-    for (const [md, folder] of Object.entries(mediaMap)) {
-      mediaTxtContent += `${md}\n${folder}\n`;
-    }
-    await vault.adapter.write(mediaTxtPath, mediaTxtContent);
-
     new PreviewModal(this.app, preview, () => new Notice("Organizer preview complete.")).open();
   }
 
@@ -188,6 +192,10 @@ class PreviewModal extends Modal {
     const pre = contentEl.createEl("pre");
     pre.textContent = this.previewLines.join("\n");
     const container = contentEl.createDiv({ cls: "modal-button-container" });
+    container.createEl("button", { text: "Close All (Leave in place)" }).onclick = () => {
+      this.app.plugins.getPlugin("image-organizer")?.settings.leaveAllInPlace = true;
+      this.close();
+    };
     container.createEl("button", { text: "Close" }).onclick = () => this.close();
   }
   onClose() { this.contentEl.empty(); }
@@ -217,6 +225,14 @@ class OrganizerSettingTab extends PluginSettingTab {
       .addToggle(toggle =>
         toggle.setValue(this.plugin.settings.maskSensitive)
           .onChange(async value => { this.plugin.settings.maskSensitive = value; await this.plugin.saveSettings(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Leave all files in place for date conflicts")
+      .setDesc("Automatically skip moving files when creation/modification mismatch detected.")
+      .addToggle(toggle =>
+        toggle.setValue(this.plugin.settings.leaveAllInPlace)
+          .onChange(async value => { this.plugin.settings.leaveAllInPlace = value; await this.plugin.saveSettings(); })
       );
   }
 }
