@@ -27,7 +27,7 @@ export default class ImageOrganizerPlugin extends Plugin {
 
     this.addCommand({
       id: "run-image-organizer",
-      name: "Run Image & Audio Organizer",
+      name: "Run Image & Audio & Video Organizer",
       callback: () => this.runOrganizer(),
     });
   }
@@ -56,30 +56,28 @@ export default class ImageOrganizerPlugin extends Plugin {
     };
 
     const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "heic"];
-    const AUDIO_EXTENSIONS = ["m4a", "mp3", "wav", "flac", "aac"];
+    const AUDIO_EXTENSIONS = ["m4a", "mp3", "wav", "flac", "aac", "ogg"];
+    const VIDEO_EXTENSIONS = ["mp4"];
+    const SUPPORTED_EXTENSIONS = [...IMAGE_EXTENSIONS, ...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS];
 
     // =====================
     // Preprocess notes for linked files
     // =====================
     const fileToLinkedNoteDate: Record<string, Date> = {};
+    const metadataCache = this.app.metadataCache;
 
     for (const mdFile of files.filter(f => f.extension === "md")) {
-      const content = await vault.read(mdFile);
-      const wikiLinks = [...content.matchAll(/\[\[([^\]]+)\]\]/g)].map(m => m[1]);
-      const mdLinks = [...content.matchAll(/\[.*?\]\((.*?)\)/g)].map(m => m[1]);
-      const allLinks = [...wikiLinks, ...mdLinks];
+      const fileCache = metadataCache.getFileCache(mdFile);
+      if (!fileCache) continue;
+
+      const links = fileCache.links?.map(l => normalizePath(l.link)) ?? [];
 
       const dateMatch = mdFile.path.match(/(\d{4})-(\d{2})-(\d{2})/);
-      let noteDate: Date | null = null;
-      if (dateMatch) {
-        noteDate = new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]));
-      }
+      if (!dateMatch) continue;
+      const noteDate = new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]));
 
-      if (noteDate) {
-        for (const link of allLinks) {
-          const normalized = normalizePath(link);
-          fileToLinkedNoteDate[normalized] = noteDate;
-        }
+      for (const link of links) {
+        fileToLinkedNoteDate[link] = noteDate;
       }
     }
 
@@ -88,8 +86,16 @@ export default class ImageOrganizerPlugin extends Plugin {
     // =====================
     for (const file of files) {
       const ext = file.extension.toLowerCase();
-      if (![...IMAGE_EXTENSIONS, ...AUDIO_EXTENSIONS].includes(ext)) {
-        const msg = `[SKIP] Unsupported type: ${file.path}`;
+
+      // Skip markdown files from moving
+      if (ext === "md") {
+        const msg = `[SKIP] Markdown file: ${this.maskName(file.path)}`;
+        preview.push(msg); logLines.push(msg);
+        continue;
+      }
+
+      if (!SUPPORTED_EXTENSIONS.includes(ext)) {
+        const msg = `[SKIP] Unsupported type: ${this.maskName(file.path)}`;
         preview.push(msg); logLines.push(msg);
         continue;
       }
@@ -100,7 +106,7 @@ export default class ImageOrganizerPlugin extends Plugin {
       let reason = "";
       let usedDate: Date | null = null;
 
-      // Prefer linked note date if exists
+      // Prefer linked note date
       if (fileToLinkedNoteDate[file.path]) {
         usedDate = fileToLinkedNoteDate[file.path];
         year = String(usedDate.getFullYear());
@@ -109,7 +115,7 @@ export default class ImageOrganizerPlugin extends Plugin {
         reason = "Linked note date";
       }
 
-      // Parse filename for date if no linked note date
+      // Parse filename
       if (!year || !month || !day) {
         const matchNumeric = file.name.match(/(\d{4})(\d{2})(\d{2})/);
         const matchMac = file.name.match(/(\d{4})-(\d{2})-(\d{2})/);
@@ -123,8 +129,8 @@ export default class ImageOrganizerPlugin extends Plugin {
         }
       }
 
-      // Audio fallback to file stats
-      if ((!year || !month || !day) && AUDIO_EXTENSIONS.includes(ext)) {
+      // Audio/video fallback to metadata
+      if ((!year || !month || !day) && [...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS].includes(ext)) {
         const stats = await vault.adapter.stat(file.path);
         const created = new Date(stats.birthtime);
         const modified = new Date(stats.mtime);
@@ -189,28 +195,20 @@ export default class ImageOrganizerPlugin extends Plugin {
     }
 
     // =====================
-    // Check broken links in markdown
+    // Broken links using Obsidian API
     // =====================
-    const mdFiles = files.filter(f => f.extension.toLowerCase() === "md");
+    const mdFiles = files.filter(f => f.extension === "md");
 
     for (const mdFile of mdFiles) {
-      const content = await vault.read(mdFile);
+      const cache = metadataCache.getFileCache(mdFile);
+      if (!cache?.links) continue;
 
-      const wikiLinks = [...content.matchAll(/\[\[([^\]]+)\]\]/g)].map(m => m[1]);
-      const mdLinks = [...content.matchAll(/\[.*?\]\((.*?)\)/g)].map(m => m[1]);
-      const allLinks = [...wikiLinks, ...mdLinks];
+      for (const link of cache.links) {
+        const target = normalizePath(link.link);
+        const targetFile = vault.getAbstractFileByPath(target);
 
-      for (const link of allLinks) {
-        let targetPath = normalizePath(link);
-        if (!targetPath.endsWith(".md") &&
-            !IMAGE_EXTENSIONS.includes(targetPath.split(".").pop()!) &&
-            !AUDIO_EXTENSIONS.includes(targetPath.split(".").pop()!)) {
-          targetPath += ".md";
-        }
-
-        const exists = await vault.adapter.exists(targetPath);
-        if (!exists) {
-          const msg = `[BROKEN LINK] ${mdFile.path} → ${targetPath}`;
+        if (!targetFile) {
+          const msg = `[BROKEN LINK] ${mdFile.path} → ${target}`;
           logLines.push(msg);
         }
       }
@@ -231,12 +229,10 @@ export default class ImageOrganizerPlugin extends Plugin {
 
     const vault = this.app.vault;
     for (const line of logLines) {
-      const match = line.match(/→ (.+) \|/);
       const srcMatch = line.match(/^.*?\s→\s(.+?)\s\|/);
-      if (!match || !srcMatch) continue;
-
-      const dstPath = normalizePath(match[1]);
-      const srcPath = normalizePath(srcMatch[1]);
+      if (!srcMatch) continue;
+      const dstPath = normalizePath(srcMatch[1]);
+      const srcPath = normalizePath(line.split(" → ")[0].replace("[DRY RUN] ", "").trim());
 
       const folder = dstPath.substring(0, dstPath.lastIndexOf("/"));
       if (!(await vault.adapter.exists(folder))) {
@@ -252,7 +248,7 @@ export default class ImageOrganizerPlugin extends Plugin {
     }
 
     await this.appendLog(logLines);
-    new Notice("Image & Audio Organizer: files moved and logged.");
+    new Notice("Image & Audio & Video Organizer: files moved and logged.");
   }
 
   // =====================
@@ -267,7 +263,7 @@ export default class ImageOrganizerPlugin extends Plugin {
     }
 
     const now = new Date();
-    const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+    const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}${String(now.getHours()).padStart(2,"0")}${String(now.getMinutes()).padStart(2,"0")}${String(now.getSeconds()).padStart(2,"0")}`;
     const logFilePath = `${logFolderPath}/image-organizer-log-${timestamp}.md`;
 
     await vault.create(logFilePath, logLines.join("\n") + "\n");
@@ -293,23 +289,17 @@ class PreviewModal extends Modal {
 
   onOpen() {
     const { contentEl } = this;
-    contentEl.createEl("h2", { text: "Image & Audio Organizer Preview" });
+    contentEl.createEl("h2", { text: "Organizer Preview" });
 
     const pre = contentEl.createEl("pre");
     pre.textContent = this.previewLines.join("\n");
 
     const container = contentEl.createDiv({ cls: "modal-button-container" });
-
-    container.createEl("button", { text: "Apply Changes" }).onclick = () => {
-      this.close();
-      this.onConfirm();
-    };
+    container.createEl("button", { text: "Apply Changes" }).onclick = () => { this.close(); this.onConfirm(); };
     container.createEl("button", { text: "Cancel" }).onclick = () => this.close();
   }
 
-  onClose() {
-    this.contentEl.empty();
-  }
+  onClose() { this.contentEl.empty(); }
 }
 
 // =====================
@@ -336,43 +326,22 @@ class DateConflictModal extends Modal {
   onOpen() {
     const { contentEl } = this;
 
-    if (this.plugin.leaveAllInPlace) {
-      this.onChoose(null);
-      this.close();
-      return;
-    }
+    if (this.plugin.leaveAllInPlace) { this.onChoose(null); this.close(); return; }
 
     contentEl.createEl("h3", { text: "Date Conflict Detected" });
     contentEl.createEl("p", { text: `File: ${this.fileName}` });
     contentEl.createEl("p", { text: `Path: ${this.filePath}` });
     contentEl.createEl("p", { text: `Created: ${this.created.toLocaleString()}` });
     contentEl.createEl("p", { text: `Modified: ${this.modified.toLocaleString()}` });
-    contentEl.createEl("p", { text: "Which date should be used for organizing?" });
 
     const container = contentEl.createDiv({ cls: "modal-button-container" });
-
-    container.createEl("button", { text: "Use Created Date" }).onclick = async () => {
-      await this.onChoose(this.created);
-      this.close();
-    };
-    container.createEl("button", { text: "Use Modified Date" }).onclick = async () => {
-      await this.onChoose(this.modified);
-      this.close();
-    };
-    container.createEl("button", { text: "Leave in Place" }).onclick = async () => {
-      await this.onChoose(null);
-      this.close();
-    };
-    container.createEl("button", { text: "Leave All in Place" }).onclick = async () => {
-      this.plugin.leaveAllInPlace = true;
-      await this.onChoose(null);
-      this.close();
-    };
+    container.createEl("button", { text: "Use Created Date" }).onclick = async () => { await this.onChoose(this.created); this.close(); };
+    container.createEl("button", { text: "Use Modified Date" }).onclick = async () => { await this.onChoose(this.modified); this.close(); };
+    container.createEl("button", { text: "Leave in Place" }).onclick = async () => { await this.onChoose(null); this.close(); };
+    container.createEl("button", { text: "Leave All in Place" }).onclick = async () => { this.plugin.leaveAllInPlace = true; await this.onChoose(null); this.close(); };
   }
 
-  onClose() {
-    this.contentEl.empty();
-  }
+  onClose() { this.contentEl.empty(); }
 }
 
 // =====================
@@ -390,30 +359,22 @@ class OrganizerSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h3", { text: "Image & Audio Organizer Settings" });
+    containerEl.createEl("h3", { text: "Organizer Settings" });
 
     new Setting(containerEl)
       .setName("Dry-run mode")
-      .setDesc("When enabled, files are never moved (preview only). Logs are still recorded.")
+      .setDesc("Files are never moved; preview only. Logs are still recorded.")
       .addToggle(toggle =>
-        toggle
-          .setValue(this.plugin.settings.dryRun)
-          .onChange(async value => {
-            this.plugin.settings.dryRun = value;
-            await this.plugin.saveSettings();
-          })
+        toggle.setValue(this.plugin.settings.dryRun)
+          .onChange(async value => { this.plugin.settings.dryRun = value; await this.plugin.saveSettings(); })
       );
 
     new Setting(containerEl)
-      .setName("Mask sensitive file names")
-      .setDesc("If enabled, filenames will be starred out in logs (private).")
+      .setName("Mask sensitive filenames")
+      .setDesc("Star out filenames in logs for privacy.")
       .addToggle(toggle =>
-        toggle
-          .setValue(this.plugin.settings.maskSensitive)
-          .onChange(async value => {
-            this.plugin.settings.maskSensitive = value;
-            await this.plugin.saveSettings();
-          })
+        toggle.setValue(this.plugin.settings.maskSensitive)
+          .onChange(async value => { this.plugin.settings.maskSensitive = value; await this.plugin.saveSettings(); })
       );
   }
 }
