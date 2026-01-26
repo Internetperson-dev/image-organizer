@@ -29,6 +29,16 @@ It should be look like:
 
 
 
+## Filtering
+
+After a dry run a log will be printed in 
+
+[Obsidian Vault]/logs/image-organizer-log-YYYYMMDDHHMMSS
+
+This can be filter with simple commands
+
+``grep "\[SKIP\]" logs/image-organizer-log-*.md``
+
 > [!CAUTION]
 > Please make a backup before using.
 > This software comes with no warranty or guarantee.
