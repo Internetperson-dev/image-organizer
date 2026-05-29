@@ -17,15 +17,12 @@ Extract the .zip from the Github Action and move it into
 
 It should be look like:
 
-  📁 plugins         📁 image-organizer        📃 main.js
-
+  📁 plugins         📁 image-organizer        📃  main.js
+                                                📃 manifest.json
+                                                📃 styles.css
   
-                                               📃 manifest.json
-
-                                               
-                                               🎨 styles.css
-
-                                               
+<img width="668" height="139" alt="image" src="https://github.com/user-attachments/assets/6335b412-5dcf-42ba-8434-72bac7edf4e6" />
+                              
 
 
 
@@ -35,7 +32,7 @@ After a dry run a log will be printed in
 
 [Obsidian Vault]/logs/image-organizer-log-YYYYMMDDHHMMSS
 
-This can be filter with simple commands
+This can be filter with simple commands to dive into.
 
 ``grep "\[SKIP\]" logs/image-organizer-log-*.md``
 
