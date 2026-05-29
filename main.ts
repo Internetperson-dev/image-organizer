@@ -44,22 +44,28 @@ export default class ImageOrganizerPlugin extends Plugin {
     const VIDEO_EXTENSIONS = ["mp4"];
     const SUPPORTED_EXTENSIONS = [...IMAGE_EXTENSIONS, ...AUDIO_EXTENSIONS, ...VIDEO_EXTENSIONS];
 
-    const mediaTxtPath = "media.txt"; // vault root
-    const mediaMap: Record<string, string> = {};
+    const locationTxtPath = "location.txt";
+    const locationMap: Record<string, string> = {};
 
     // ---------------------
-    // Load manual media.txt
+    // Load location.txt
+    // Format:  Filename.ext -> destination/folder
+    // Example: Q2.MD       -> Notes/2024/Other/PQ2s
+    // Lines starting with # are comments.
     // ---------------------
-    if (await vault.adapter.exists(mediaTxtPath)) {
-      const content = await vault.adapter.read(mediaTxtPath);
-      const lines = content.split(/\r?\n/).filter(l => l.trim());
-      for (let i = 0; i < lines.length; i += 2) {
-        const md = lines[i];
-        const folder = lines[i + 1];
-        if (md && folder) mediaMap[md] = folder;
+    if (await vault.adapter.exists(locationTxtPath)) {
+      const content = await vault.adapter.read(locationTxtPath);
+      const lines = content.split(/\r?\n/).filter(l => l.trim() && !l.trim().startsWith("#"));
+      for (const line of lines) {
+        const match = line.match(/^(.+?)\s*->\s*(.+)$/);
+        if (match) {
+          const filename = match[1].trim();
+          const folder = match[2].trim();
+          if (filename && folder) locationMap[filename.toLowerCase()] = folder;
+        }
       }
     } else {
-      new Notice("media.txt not found in vault root");
+      new Notice("location.txt not found in vault root");
       return;
     }
 
@@ -69,8 +75,9 @@ export default class ImageOrganizerPlugin extends Plugin {
     // Process markdown files for linked media
     // ---------------------
     for (const mdFile of files.filter(f => f.extension === "md")) {
-      if (!mediaMap[mdFile.path]) continue; // only process MD listed in media.txt
-      const targetFolder = normalizePath(mediaMap[mdFile.path]);
+      const matchedFolder = locationMap[mdFile.name.toLowerCase()];
+      if (!matchedFolder) continue;
+      const targetFolder = normalizePath(matchedFolder);
       if (!this.settings.dryRun) await vault.createFolder(targetFolder).catch(() => {});
 
       const cache = metadataCache.getFileCache(mdFile);
@@ -109,8 +116,8 @@ export default class ImageOrganizerPlugin extends Plugin {
         }
       }
 
-      preview.push(`Check media.txt for media from ${mdFile.path}`);
-      logLines.push(`Check media.txt for media from ${mdFile.path}`);
+      preview.push(`Check location.txt for media from ${mdFile.name}`);
+      logLines.push(`Check location.txt for media from ${mdFile.name}`);
     }
 
     // ---------------------
