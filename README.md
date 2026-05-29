@@ -43,5 +43,5 @@ This can be filter with simple commands
 > Please make a backup before using.
 > This software comes with no warranty or guarantee.
 >
-> SlopGPT made it.
+> ChatGPT made it.
 
