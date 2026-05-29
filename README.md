@@ -29,6 +29,13 @@ Open Obsidian "Ctrl + P" Settings -> Plugins, enable community plugins, enable i
 <img width="1104" height="926" alt="image" src="https://github.com/user-attachments/assets/e4e6ea31-3a11-4634-a798-36a03be859d2" />
 
 
+<img width="1109" height="925" alt="image" src="https://github.com/user-attachments/assets/48c4fa3a-a869-4615-ae56-79df77385eba" />
+
+
+<img width="714" height="142" alt="image" src="https://github.com/user-attachments/assets/184a143b-8b6d-4e6c-b121-a1228fd847da" />
+
+
+
 
 ## Filtering
 
