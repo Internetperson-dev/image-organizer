@@ -54,15 +54,9 @@ export default class ImageOrganizerPlugin extends Plugin {
     const logLines: string[] = [];
     const preview: string[] = [];
 
-    const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "heic"];
+    const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "heic", "webp", "gif"];
     const AUDIO_EXTENSIONS = ["m4a", "mp3", "wav", "flac", "aac", "ogg"];
-    const VIDEO_EXTENSIONS = ["mp4"];
-
-    const SUPPORTED_EXTENSIONS = [
-      ...IMAGE_EXTENSIONS,
-      ...AUDIO_EXTENSIONS,
-      ...VIDEO_EXTENSIONS,
-    ];
+    const VIDEO_EXTENSIONS = ["mp4", "mov", "webm"];
 
     const locationTxtPath = "location.txt";
     const locationMap: Record<string, string> = {};
@@ -73,13 +67,10 @@ export default class ImageOrganizerPlugin extends Plugin {
     if (await vault.adapter.exists(locationTxtPath)) {
       const content = await vault.adapter.read(locationTxtPath);
 
-      const lines = content
-        .split(/\r?\n/)
-        .filter((l) => l.trim() && !l.trim().startsWith("#"));
+      for (const line of content.split(/\r?\n/)) {
+        if (!line.trim() || line.trim().startsWith("#")) continue;
 
-      for (const line of lines) {
         const match = line.match(/^(.+?)\s*->\s*(.+)$/);
-
         if (!match) continue;
 
         const filename = match[1].trim().toLowerCase();
@@ -98,94 +89,95 @@ export default class ImageOrganizerPlugin extends Plugin {
     // PROCESS MARKDOWN FILES
     // ------------------------------------------------
     for (const mdFile of files.filter((f) => f.extension === "md")) {
-      const key = mdFile.name.toLowerCase();
-      const targetFolder = locationMap[key];
-
+      const targetFolder = locationMap[mdFile.name.toLowerCase()];
       if (!targetFolder) continue;
 
       await this.ensureFolderExists(targetFolder);
 
+      const mdCache = metadataCache.getFileCache(mdFile);
+      if (!mdCache) continue;
+
+      const allRefs = [
+        ...(mdCache.links ?? []),
+        ...(mdCache.embeds ?? []),
+      ];
+
       // ------------------------------------------------
-      // MOVE MARKDOWN FILE ITSELF
+      // MOVE MEDIA FIRST (IMPORTANT)
+      // ------------------------------------------------
+      for (const ref of allRefs) {
+        const raw = ref.link.split("|")[0];
+
+        const mediaFile = metadataCache.getFirstLinkpathDest(
+          raw,
+          mdFile.path
+        ) as TFile;
+
+        if (!mediaFile) continue;
+
+        const ext = mediaFile.extension.toLowerCase();
+
+        let subfolder = "Other";
+
+        if (IMAGE_EXTENSIONS.includes(ext)) subfolder = "Images";
+        else if (AUDIO_EXTENSIONS.includes(ext)) subfolder = "Audio";
+        else if (VIDEO_EXTENSIONS.includes(ext)) subfolder = "Video";
+
+        const finalFolder = normalizePath(
+          `${targetFolder}/${subfolder}`
+        );
+
+        await this.ensureFolderExists(finalFolder);
+
+        const dstPath = normalizePath(
+          `${finalFolder}/${mediaFile.name}`
+        );
+
+        if (mediaFile.path === dstPath) continue;
+
+        const msg = `[MEDIA MOVE] ${mediaFile.path} → ${dstPath}`;
+        preview.push(msg);
+        logLines.push(msg);
+
+        if (!this.settings.dryRun && !this.settings.leaveAllInPlace) {
+          await vault.rename(mediaFile, dstPath).catch(console.error);
+        }
+      }
+
+      // ------------------------------------------------
+      // MOVE MARKDOWN FILE
       // ------------------------------------------------
       const mdTargetPath = normalizePath(
         `${targetFolder}/${mdFile.name}`
       );
 
-      preview.push(
-        `[MD MOVE] ${this.maskName(mdFile.path)} → ${mdTargetPath}`
-      );
-      logLines.push(
-        `[MD MOVE] ${mdFile.path} → ${mdTargetPath}`
-      );
+      preview.push(`[MD MOVE] ${mdFile.path} → ${mdTargetPath}`);
+      logLines.push(`[MD MOVE] ${mdFile.path} → ${mdTargetPath}`);
 
       if (!this.settings.dryRun) {
-        await vault.rename(mdFile, mdTargetPath).catch((err) => {
-          console.error("Failed moving MD:", err);
-        });
-      }
-
-      // ------------------------------------------------
-      // MOVE LINKED MEDIA
-      // ------------------------------------------------
-      const cache = metadataCache.getFileCache(mdFile);
-      if (!cache?.links) continue;
-
-      for (const linkObj of cache.links) {
-        const linkedPath = normalizePath(linkObj.link);
-
-        const mediaFile =
-          vault.getAbstractFileByPath(linkedPath) as TFile;
-
-        if (!mediaFile) {
-          const msg = `[BROKEN LINK] ${mdFile.path} → ${linkedPath}`;
-          preview.push(msg);
-          logLines.push(msg);
-          continue;
-        }
-
-        const ext = mediaFile.extension.toLowerCase();
-
-        if (!SUPPORTED_EXTENSIONS.includes(ext)) continue;
-
-        const dstPath = normalizePath(
-          `${targetFolder}/${mediaFile.name}`
-        );
-
-        if (mediaFile.path === dstPath) continue;
-
-        const msg = `[MEDIA MOVE] ${this.maskName(
-          mediaFile.path
-        )} → ${dstPath}`;
-
-        preview.push(msg);
-        logLines.push(msg);
-
-        if (!this.settings.dryRun && !this.settings.leaveAllInPlace) {
-          await vault.rename(mediaFile, dstPath).catch((err) => {
-            console.error(
-              `Failed moving media ${mediaFile.path}`,
-              err
-            );
-          });
-        }
+        await vault.rename(mdFile, mdTargetPath).catch(console.error);
       }
     }
 
     // ------------------------------------------------
-    // BROKEN LINK SCAN (global safety pass)
+    // BROKEN LINK CHECK
     // ------------------------------------------------
     for (const mdFile of files.filter((f) => f.extension === "md")) {
-      const cache = metadataCache.getFileCache(mdFile);
-      if (!cache?.links) continue;
+      const mdCache = metadataCache.getFileCache(mdFile);
+      if (!mdCache) continue;
 
-      for (const link of cache.links) {
-        const target = normalizePath(link.link);
-        const exists = vault.getAbstractFileByPath(target);
+      for (const ref of [
+        ...(mdCache.links ?? []),
+        ...(mdCache.embeds ?? []),
+      ]) {
+        const target = metadataCache.getFirstLinkpathDest(
+          ref.link.split("|")[0],
+          mdFile.path
+        );
 
-        if (!exists) {
+        if (!target) {
           logLines.push(
-            `[BROKEN LINK] ${mdFile.path} → ${target}`
+            `[BROKEN LINK] ${mdFile.path} → ${ref.link}`
           );
         }
       }
@@ -199,7 +191,7 @@ export default class ImageOrganizerPlugin extends Plugin {
     await this.appendLog(logLines, logFileName);
 
     // ------------------------------------------------
-    // PREVIEW
+    // PREVIEW MODAL
     // ------------------------------------------------
     new PreviewModal(
       this.app,
@@ -209,20 +201,28 @@ export default class ImageOrganizerPlugin extends Plugin {
   }
 
   // ------------------------------------------------
-  // CREATE FOLDERS RECURSIVELY
+  // SAFE FOLDER CREATION (FIX INCLUDED)
   // ------------------------------------------------
   async ensureFolderExists(folderPath: string) {
-    const parts = normalizePath(folderPath).split("/");
+    const vault = this.app.vault;
+
+    const normalized = normalizePath(folderPath);
+    const parts = normalized.split("/");
+
     let current = "";
 
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
 
       try {
-        if (!(await this.app.vault.adapter.exists(current))) {
-          await this.app.vault.createFolder(current);
+        const exists = await vault.adapter.exists(current);
+
+        if (!exists) {
+          await vault.createFolder(current);
         }
-      } catch (_) {}
+      } catch (_) {
+        // ignore race conditions / existing folder errors
+      }
     }
   }
 
