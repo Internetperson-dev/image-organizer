@@ -24,6 +24,10 @@ It should be look like:
 <img width="668" height="139" alt="image" src="https://github.com/user-attachments/assets/6335b412-5dcf-42ba-8434-72bac7edf4e6" />
                               
 
+Open Obsidian "Ctrl + P" Settings -> Plugins, enable community plugins, enable it, configure the plugin in the settings menu, and use ctrl P to do a dry or full run.
+
+<img width="1104" height="926" alt="image" src="https://github.com/user-attachments/assets/e4e6ea31-3a11-4634-a798-36a03be859d2" />
+
 
 
 ## Filtering
